@@ -1,14 +1,25 @@
-# Save as "UTF-8 with BOM" as Chinese Char
+# Save as "UTF-8 with BOM" as Chinese characters
 # Define the URL and file path
 $url = "https://www.youtube.com/xxxxx/stream"
 $oldFilePath = "C:\temp\youtube-record.html"
 
+# Define TG
 $botToken = '9999999999:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 $chat = '-9999999999'
 
+# Define Loop - Max retries
+$maxRetries = 3
+
+# Define bgutilhttp
+$bgutilhttp = 'http://xxx.xxx.xxx.xxx:4416'
+# Due to YT Live new policy, require to use 
+#   deno (https://github.com/denoland/deno)
+#   node.js (install it https://nodejs.org/en/download/current)
+#   bgutil-ytdlp-pot-provider (https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+
 # Define the DOS command you want to run
 $dosCommand = "X:\YT-Video\yt-dlp.exe"
-$dosCommandArguments = "-U --merge-output-format mp4 --live-from-start --embed-thumbnail --add-metadata --cookies-from-browser firefox https://www.youtube.com/watch?v="
+$dosCommandArguments = "-U --merge-output-format mp4 --live-from-start --embed-thumbnail --add-metadata --encoding utf-8 --cookies-from-browser firefox --extractor-args `"youtubepot-bgutilhttp:base_url=$bgutilhttp`" --js-runtime node https://www.youtube.com/watch?v="
 
 function Send-TelegramTextMessage {
     [CmdletBinding()]
@@ -98,10 +109,6 @@ function Send-TelegramTextMessage {
     return $results
 } #function_Send-TelegramTextMessage
 
-# Fetch the current HTML content
-$responseNew = Invoke-WebRequest -Uri $url -UseBasicParsing
-$newHtmlContent = $responseNew.Content
-
 # Function to extract ytInitialData script section
 function Get-YtInitialData {
     param (
@@ -131,7 +138,8 @@ function Extract-GroupedFields {
                     $title = $_.Value
                     if ($title -is [System.Management.Automation.PSObject]) {
                         $title.PSObject.Properties | ForEach-Object {
-                            if ($_.Name -eq "simpleText" -and $_.Value -ne "") {
+                            #if ($_.Name -eq "simpleText" -and $_.Value -notlike "*收看次數*" -and $_.Value -ne "") {
+                            if ($_.Name -eq "runs" -and $_.Value -ne "") {
                                 $group["simpleText"] = $_.Value
                             }
                         }
@@ -150,6 +158,56 @@ function Extract-GroupedFields {
     }
     return $fields
 }
+
+function Get-TrimmedDownloadOutput {
+    param (
+        [string]$Output
+    )
+
+    # Split into lines
+    $lines = $Output -split "`r?`n"
+
+    # Find line numbers that contain multiple [download]% markers
+    $segments = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '\[download\].*%.*\[download\].*%' -or
+			$lines[$i] -match '^\d+:\s*\[download\]') {
+            
+			$segments += $i
+        }
+    }
+
+    # Process each segment line
+    foreach ($idx in $segments) {
+        $segLine = $lines[$idx]
+
+        # Split that single line into pseudo-lines at each [download]
+		if ($segLine -match '\[download\].*%.*\[download\].*%') {
+			$parts = $segLine -split '(?=\[download\])'
+		}else{
+			$parts = $segLine -split '(?=\d+:\s\[download\])'
+		}
+        $parts = $parts | Where-Object { $_.Trim() -ne "" }
+
+        # Take first 3 and last 3
+        $first3 = $parts | Select-Object -First 3
+        $last3  = $parts | Select-Object -Last 3
+
+        # Build shortened segment
+        $shortSeg = ($first3 + '...' + $last3) -join "`n"
+
+        # Replace back into $lines array
+        $lines[$idx] = $shortSeg
+    }
+
+    # Return the modified output as a single string
+    return ($lines -join "`n")
+}
+
+
+# Fetch the current HTML content
+$responseNew = Invoke-WebRequest -Uri $ytURL -UseBasicParsing
+$newHtmlContent = $responseNew.Content
 
 # Initialize output string and hash table for unique combinations
 $outputString = ""
@@ -176,17 +234,13 @@ if (Test-Path $oldFilePath) {
 
         # Append only unique differences to the output string
         $diff | ForEach-Object {
-            $uniqueKey = "$($_.videoId)|$($_.simpleText)"
+            #$uniqueKey = "$($_.videoId)|$($_.simpleText)"
+            $uniqueKey = "$($_.videoId)"
             if (-not $uniqueFields.ContainsKey($uniqueKey)) {
                 $uniqueFields[$uniqueKey] = $true
                 if ($_.SideIndicator -eq "=>") {
                     $outputString += "New: videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
                 }
-                #if ($_.SideIndicator -eq "<=") {
-                #    $outputString += "Old: videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
-                #} elseif ($_.SideIndicator -eq "=>") {
-                #    $outputString += "New: videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
-                #}
             }
         }
     } else {
@@ -211,32 +265,103 @@ if (Test-Path $oldFilePath) {
 }
 
 # Replace the old HTML file with the new HTML content
-#$outputString += "The old HTML file has been replaced with the new HTML content.`n"
 [System.IO.File]::WriteAllText($oldFilePath, $newHtmlContent, [System.Text.Encoding]::UTF8)
 
 # Output the final string
 if ($outputString -ne "") {
 
-    Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message ("Downloading : " + $newFields[0].simpleText.ToString() + " as " + $newFields[0].videoId)
-
-    # Extract the directory path from the DOS command
+	$retryCount = 0
+	$success = $false
+	
+	# Extract the directory path from the DOS command
     $commandDirectory = Split-Path -Path $dosCommand
 
     # Set the working directory to the command's folder
     Set-Location -Path $commandDirectory
+	
+	while ($retryCount -lt $maxRetries -and -not $success) {
+		$retryCount++
 
-    try {
-        # Run the DOS command and wait for it to complete
-        Start-Process "cmd.exe" -ArgumentList "/c $dosCommand $dosCommandArguments$($newFields[0].videoId)" -NoNewWindow -Wait -PassThru
-        Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Downloading : Executed successfully! - $dosCommand $dosCommandArguments$($newFields[0].videoId)"
-    } catch {
-        $errorMessage = $_.Exception.Message
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        $errorLogEntry = "$timestamp - Error: $errorMessage"
-    
-        Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Downloading : Error occurred - " $errorLogEntry
-    }
-}else{
-    #Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "YT-xxxxxx - No Update"
+		$startTime = Get-Date
+		try {
+			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message ("" + $newFields[0].simpleText[0].text + " as " + $newFields[0].videoId)
+			
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "cmd.exe"
+            $psi.Arguments = "/c chcp 65001 >nul && $dosCommand $dosCommandArguments$($newFields[0].videoId)"
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+
+            $psi.WorkingDirectory = "E:\YT-Video"
+            $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+            $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
+
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $psi
+            $process.Start() | Out-Null
+
+            # Capture output
+            $output = $process.StandardOutput.ReadToEnd()
+            $errorOutput = $process.StandardError.ReadToEnd()
+
+            $process.WaitForExit()
+
+			$endTime = Get-Date
+			$elapsedSeconds = ($endTime - $startTime).TotalSeconds
+			
+			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Run #$retryCount finished (ExitCode=$($process.ExitCode), Duration=$([math]::Round($elapsedSeconds))s)"
+
+			# Retry if runtime < 1h and errorOutput does not find "ERROR: Did not get any data blocks"
+			if (-not ($errorOutput -match "ERROR: Did not get any data blocks" -and $elapsedSeconds -ge 3600)) {
+				Add-Content -Path $logPath -Value ("==== Run #$retryCount start at $($startTime) ====`n" + $output + "`n==== Error ====`n" + $errorOutput + "`n==== Run #$retryCount end at $($endTime) ====`n") -Encoding UTF8
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message $(Get-TrimmedDownloadOutput($output))
+				
+				if ($retryCount -lt $maxRetries) {
+
+					#Clear YT-DLP Cache
+                    $process = Start-Process "cmd.exe" -ArgumentList "/c $dosCommand --rm-cache-dir" -Wait -PassThru
+                    
+					#Rename downloaded file
+					if ($output -match '\[download\]\s+(.+?)\s+has already been downloaded' -or
+						$output -match '\[Merger\]\s+Merging formats into\s+"(.+?)"') {
+
+						$downloadedFile = $matches[1]
+
+						# Build timestamp string (yyyyMMdd_HHmmss format)
+						$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+						# Extract directory and base name
+						#  $directory = Split-Path $downloadedFile
+						$baseName  = [System.IO.Path]::GetFileNameWithoutExtension($downloadedFile)
+						$extension = [System.IO.Path]::GetExtension($downloadedFile)
+
+						# Construct new filename
+						$newFileName = "$baseName`_$timestamp$extension"
+						$newFilePath = Join-Path $commandDirectory $newFileName
+						$downloadFilePath = Join-Path $commandDirectory $downloadedFile
+
+						# Rename the file
+						[System.IO.File]::Move($downloadFilePath, $newFilePath)
+
+						# Notify via Telegram
+						Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file:`n$downloadedFile → $newFileName"
+					}
+
+					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended too soon (&lt;1h). Retrying..."
+				} else {
+					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended too soon (&lt;1h). Max retries reached. Ended."
+				}
+			} else {
+				$success = $true
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) - Completed. Ended."
+			}
+		} catch {
+			$errorMessage = $_.Exception.Message
+			$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+			$errorLogEntry = "$timestamp - Error: $errorMessage"
+			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "YT Live Downloader : Error occurred - $errorLogEntry"
+		}
+	}
 }
-
