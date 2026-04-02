@@ -377,14 +377,12 @@ if ($outputString -ne "") {
 				} else {
 					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended prematurely ($expectedSeconds)s. Max retries reached. Ended."
 				}
-			} else {
-				$success = $true
-				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) - Completed. Ended."
 			}
 		} catch {
 			$errorMessage = $_.Exception.Message
 			$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 			$errorLogEntry = "$timestamp - Error: $errorMessage"
+			Add-Content -Path $logPath -Value $errorLogEntry -Encoding UTF8
 			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "YT Live Downloader : Error occurred - $errorLogEntry"
 		}
 	}
