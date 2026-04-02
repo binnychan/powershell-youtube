@@ -1,7 +1,11 @@
 # Save as "UTF-8 with BOM" as Chinese characters
 # Define the URL and file path
-$url = "https://www.youtube.com/xxxxx/stream"
-$oldFilePath = "C:\temp\youtube-record.html"
+param(
+    [string]$ytURL = "https://www.youtube.com/xxxxx/stream",
+    [string]$oldFilePath = "C:\Temp\YT.html",
+    [string]$logPath = "C:\Temp\YT-Downloader.LOG",
+    [int]$expectedSeconds = 3600
+)
 
 # Define TG
 $botToken = '9999999999:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
@@ -20,6 +24,17 @@ $bgutilhttp = 'http://xxx.xxx.xxx.xxx:4416'
 # Define the DOS command you want to run
 $dosCommand = "X:\YT-Video\yt-dlp.exe"
 $dosCommandArguments = "-U --merge-output-format mp4 --live-from-start --embed-thumbnail --add-metadata --encoding utf-8 --cookies-from-browser firefox --extractor-args `"youtubepot-bgutilhttp:base_url=$bgutilhttp`" --js-runtime node https://www.youtube.com/watch?v="
+
+# Extract channel name
+if ($ytURL -match '@([^/]+)') {
+    $channelName = $matches[1]
+    #Write-Output "Channel name: $channelName"
+#} else {
+    #Write-Output "No channel name found in URL."
+}
+
+# Add yyyyMMdd at $logPath 
+$logPath = Join-Path (Split-Path $logPath) ("{0}-{1}-{2}{3}" -f [System.IO.Path]::GetFileNameWithoutExtension($logPath), $channelName, (Get-Date -Format "yyyyMMdd"), [System.IO.Path]::GetExtension($logPath))
 
 function Send-TelegramTextMessage {
     [CmdletBinding()]
@@ -313,11 +328,21 @@ if ($outputString -ne "") {
 			
 			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Run #$retryCount finished (ExitCode=$($process.ExitCode), Duration=$([math]::Round($elapsedSeconds))s)"
 
-			# Retry if runtime < 1h and errorOutput does not find "ERROR: Did not get any data blocks"
-			if (-not ($errorOutput -match "ERROR: Did not get any data blocks" -and $elapsedSeconds -ge 3600)) {
+			# Success if no error output and ran for the expected time, or specific end-of-stream error
+			if (($null -eq $errorOutput -or $errorOutput -eq "") -and $elapsedSeconds -ge $expectedSeconds) {
+				$success = $true
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) - Completed successfully. Ended."
+			} elseif ($errorOutput -match "ERROR: Did not get any data blocks" -and $elapsedSeconds -ge $expectedSeconds) {
+				$success = $true
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) - Stream ended normally. Completed."
+			} else {
 				Add-Content -Path $logPath -Value ("==== Run #$retryCount start at $($startTime) ====`n" + $output + "`n==== Error ====`n" + $errorOutput + "`n==== Run #$retryCount end at $($endTime) ====`n") -Encoding UTF8
-				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message $(Get-TrimmedDownloadOutput($output))
-				
+				$message = Get-TrimmedDownloadOutput($output)
+				if ($null -ne $errorOutput -and $errorOutput -ne "") {
+					$message += "`n" + $errorOutput.Trim()
+				}
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message $message
+								
 				if ($retryCount -lt $maxRetries) {
 
 					#Clear YT-DLP Cache
@@ -333,7 +358,6 @@ if ($outputString -ne "") {
 						$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 						# Extract directory and base name
-						#  $directory = Split-Path $downloadedFile
 						$baseName  = [System.IO.Path]::GetFileNameWithoutExtension($downloadedFile)
 						$extension = [System.IO.Path]::GetExtension($downloadedFile)
 
@@ -349,9 +373,9 @@ if ($outputString -ne "") {
 						Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file:`n$downloadedFile → $newFileName"
 					}
 
-					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended too soon (&lt;1h). Retrying..."
+					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended prematurely ($expectedSeconds)s. Retrying..."
 				} else {
-					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended too soon (&lt;1h). Max retries reached. Ended."
+					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended prematurely ($expectedSeconds)s. Max retries reached. Ended."
 				}
 			} else {
 				$success = $true
