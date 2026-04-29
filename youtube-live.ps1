@@ -1,18 +1,21 @@
 # Save as "UTF-8 with BOM" as Chinese characters
 # Define the URL and file path
+# $url = "https://www.youtube.com/@xxxxx/streams"
+# $oldFilePath = "C:\temp\YT-Info.json"
+
 param(
-    [string]$ytURL = "https://www.youtube.com/xxxxx/stream",
-    [string]$oldFilePath = "C:\Temp\YT.html",
+    [string]$ytURL = "https://www.youtube.com/@xxxxx/streams",
+    [string]$oldFilePath = "C:\Temp\YT-Info.json",
     [string]$logPath = "C:\Temp\YT-Downloader.LOG",
-    [int]$expectedSeconds = 3600
+    [int]$expectedDurationSeconds = 3600,
+    [switch]$Debug
 )
+
+if ($Debug) { Write-Host "=== Script Started with Debug Mode Enabled ===" -ForegroundColor Green }
 
 # Define TG
 $botToken = '9999999999:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 $chat = '-9999999999'
-
-# Define Loop - Max retries
-$maxRetries = 3
 
 # Define bgutilhttp
 $bgutilhttp = 'http://xxx.xxx.xxx.xxx:4416'
@@ -28,13 +31,21 @@ $dosCommandArguments = "-U --merge-output-format mp4 --live-from-start --embed-t
 # Extract channel name
 if ($ytURL -match '@([^/]+)') {
     $channelName = $matches[1]
-    #Write-Output "Channel name: $channelName"
-#} else {
-    #Write-Output "No channel name found in URL."
+    if ($Debug) { Write-Host "Channel name: $channelName" }
+} else {
+    $channelName = "UnknownChannel"
+    if ($Debug) { Write-Host "Could not extract channel name from URL. Using default: $channelName" }
 }
 
 # Add yyyyMMdd at $logPath 
 $logPath = Join-Path (Split-Path $logPath) ("{0}-{1}-{2}{3}" -f [System.IO.Path]::GetFileNameWithoutExtension($logPath), $channelName, (Get-Date -Format "yyyyMMdd"), [System.IO.Path]::GetExtension($logPath))
+
+# Force UTF-8 output regardless of host
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} else {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+}
 
 function Send-TelegramTextMessage {
     [CmdletBinding()]
@@ -108,8 +119,10 @@ function Send-TelegramTextMessage {
         Method      = 'Post'
     }
     try {
-        $results = Invoke-RestMethod @invokeRestMethodSplat
-    } #try_messageSend
+		if (-not $Debug) {
+            $results = Invoke-RestMethod @invokeRestMethodSplat
+        }
+	} #try_messageSend
     catch {
         Write-Warning -Message 'An error was encountered sending the Telegram message:'
         Write-Error $_
@@ -138,39 +151,126 @@ function Get-YtInitialData {
 }
 
 # Function to extract and group videoId and simpleText fields
-function Extract-GroupedFields {
+function Get-GroupedFields {
     param (
         [object]$jsonObject
     )
+    
     $fields = @()
-    $jsonObject | ForEach-Object {
-        if ($_ -is [System.Management.Automation.PSObject]) {
-            $group = @{}
-            $_.PSObject.Properties | ForEach-Object {
-                if ($_.Name -eq "videoId") {
-                    $group["videoId"] = $_.Value
-                } elseif ($_.Name -eq "title") {
-                    $title = $_.Value
-                    if ($title -is [System.Management.Automation.PSObject]) {
-                        $title.PSObject.Properties | ForEach-Object {
-                            #if ($_.Name -eq "simpleText" -and $_.Value -notlike "*收看次數*" -and $_.Value -ne "") {
-                            if ($_.Name -eq "runs" -and $_.Value -ne "") {
-                                $group["simpleText"] = $_.Value
-                            }
-                        }
-                    }
-                } elseif ($_.Value -is [System.Management.Automation.PSObject] -or $_.Value -is [System.Collections.IEnumerable]) {
-                    $nestedFields = Extract-GroupedFields -jsonObject $_.Value
-                    if ($nestedFields) {
-                        $fields += $nestedFields
-                    }
-                }
-            }
-            if ($group["videoId"] -and $group["simpleText"]) {
-                $fields += [PSCustomObject]$group
+    $targetTitle = "直播"
+
+    # Navigate to the tabs array
+    $tabs = $jsonObject.contents.twoColumnBrowseResultsRenderer.tabs
+    if ($Debug) { Write-Host "Found tabs: $($tabs.Count)" }
+
+    # Debug: Show all tab titles
+    if ($Debug) {
+        Write-Host "=== All Tab Titles ===" -ForegroundColor Yellow
+        foreach ($tab in $tabs) {
+            if ($tab.tabRenderer.title) {
+                $title = $tab.tabRenderer.title
+                Write-Host "  Tab title: '$title'" -ForegroundColor Cyan
+                Write-Host "    Length: $($title.Length), Bytes: $([System.Text.Encoding]::UTF8.GetBytes($title) -join ',')" -ForegroundColor Gray
+                Write-Host "    Matches $($targetTitle): $($title -eq $($targetTitle))" -ForegroundColor Gray
+                #Write-Host "    Matches '直播': " -ForegroundColor Gray -NoNewline
+                #Write-Host $targetTitle -ForegroundColor Gray
+            } else {
+                Write-Host "  Tab: (No title property)" -ForegroundColor Gray
             }
         }
     }
+
+    # Find the tab(s) where title = "直播"
+    $targetTabs = $tabs | Where-Object { $_.tabRenderer.title -eq $targetTitle }
+    
+    # If not found, try case-insensitive or partial match
+    if (-not $targetTabs) {
+        if ($Debug) { Write-Host "Exact match '$($targetTitle)' not found, trying case-insensitive..." -ForegroundColor Yellow }
+        $targetTabs = $tabs | Where-Object { $_.tabRenderer.title -like "*$($targetTitle)*" }
+    }
+    
+    # If still not found, try to find by looking at tab with richGridRenderer content
+    if (-not $targetTabs) {
+        if ($Debug) { Write-Host "Partial match failed, trying to find tab with richGridRenderer content..." -ForegroundColor Yellow }
+        $targetTabs = $tabs | Where-Object { $null -ne $_.tabRenderer.content.richGridRenderer }
+        if ($targetTabs) {
+            if ($Debug) { Write-Host "Found $($targetTabs.tabRenderer.title) tab(s) with richGridRenderer content" }
+        }
+    }
+    
+    # If still nothing, show all properties of all tabs for debugging
+    if (-not $targetTabs) {
+        if ($Debug) {
+            Write-Host "ERROR: Still no tabs found. Showing all tab properties..." -ForegroundColor Red
+            for ($i = 0; $i -lt $tabs.Count; $i++) {
+                $tab = $tabs[$i]
+                Write-Host "Tab[$i] Properties:" -ForegroundColor Yellow
+                if ($tab.tabRenderer) {
+                    $tab.tabRenderer | Get-Member -MemberType NoteProperty | ForEach-Object {
+                        $propName = $_.Name
+                        $propValue = $tab.tabRenderer.$propName
+                        if ($propValue -is [string]) {
+                            Write-Host "  .$propName = '$propValue'" -ForegroundColor Gray
+                        } elseif ($propValue -is [object]) {
+                            Write-Host "  .$propName = [Object]" -ForegroundColor Gray
+                        } else {
+                            Write-Host "  .$propName = $propValue" -ForegroundColor Gray
+                        }
+                    }
+                }
+            }
+            Write-Host "Save the json structure of the entire tabs array for offline analysis." -ForegroundColor Yellow
+            $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+            $tabs | ConvertTo-Json -Depth 100 | Out-File -FilePath "C:\Temp\YT-Tabs-Debug_$timestamp.json" -Encoding UTF8
+        }
+        return @()
+    }
+    
+    if ($Debug) { Write-Host "Found targettabs - Titles: $($targetTabs.tabRenderer.title -join ', ')" }
+
+    if ($targetTabs) {
+        if ($Debug) { Write-Host "Found items in target tab: $($targetTabs.tabRenderer.content.richGridRenderer.contents.Count)" }
+    } else {
+        if ($Debug) { Write-Host "ERROR: No target tabs found! Will return empty results." -ForegroundColor Red }
+        return @()
+    }
+	
+	$targetTabs.tabRenderer.content.richGridRenderer.contents | ForEach-Object {
+		#$videoId   = $_.richItemRenderer.content.lockupViewModel.contentID
+		#$simpleText = $_.richItemRenderer.content.lockupViewModel.metadata.lockupMetadataViewModel.title.content
+		$videoId = $_.richItemRenderer.content.lockupViewModel.contentID
+		if (-not $videoId) {
+			$videoId = $_.richItemRenderer.content.videoRenderer.videoID
+		}
+
+		$simpleText = $_.richItemRenderer.content.lockupViewModel.metadata.lockupMetadataViewModel.title.content
+		if (-not $simpleText) {
+			$simpleText = ($_.richItemRenderer.content.videoRenderer.title.runs | ForEach-Object { $_.text }) -join ''
+		}
+
+		# Only proceed if both fields are non-empty
+		if (![string]::IsNullOrWhiteSpace($videoId) -and 
+			![string]::IsNullOrWhiteSpace($simpleText)) {
+			
+			$group = @{
+				videoId    = $videoId
+				simpleText = $simpleText
+			}
+
+			if ($Debug) { 
+                Write-Host "Group: videoId=" -NoNewline
+                Write-Host $videoId -ForegroundColor Green -NoNewline
+                Write-Host ", simpleText=" -NoNewline
+                Write-Host $simpleText -ForegroundColor Green
+            }
+			$fields += [PSCustomObject]$group
+		} else {
+            if ($Debug) { 
+                Write-Host "Skipping item due to missing fields: videoId='$videoId', simpleText='$simpleText'" -ForegroundColor Yellow
+            }
+        }
+	}
+	
     return $fields
 }
 
@@ -224,24 +324,45 @@ function Get-TrimmedDownloadOutput {
 $responseNew = Invoke-WebRequest -Uri $ytURL -UseBasicParsing
 $newHtmlContent = $responseNew.Content
 
-# Initialize output string and hash table for unique combinations
-$outputString = ""
-$uniqueFields = @{}
-
 # Extract ytInitialData from new HTML content
 $newYtInitialData = Get-YtInitialData -htmlContent $newHtmlContent
 
+if ($Debug) {
+    Write-Host "=== ytInitialData Structure ===" -ForegroundColor Yellow
+    if ($newYtInitialData) {
+        Write-Host "ytInitialData exists: Yes" -ForegroundColor Green
+        if ($newYtInitialData.contents) {
+            Write-Host "  .contents: exists" -ForegroundColor Green
+            if ($newYtInitialData.contents.twoColumnBrowseResultsRenderer) {
+                Write-Host "    .twoColumnBrowseResultsRenderer: exists" -ForegroundColor Green
+            } else {
+                Write-Host "    .twoColumnBrowseResultsRenderer: MISSING" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  .contents: MISSING" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "ytInitialData exists: NO - JSON parsing may have failed" -ForegroundColor Red
+    }
+}
+
 # Extract and group specific fields from new HTML content
-$newFields = Extract-GroupedFields -jsonObject $newYtInitialData
+$newFields = Get-GroupedFields -jsonObject $newYtInitialData
 
-# Check if old.html exists
+if ($Debug) { Write-Host "Extracted $($newFields.Count) new fields from HTML content" }
+
+# Initialize output string and hash table for unique combinations
+$outputString = ""
+$uniqueFields = @{}
+$liveStream = $false
+
+# Check if old file exists
 if (Test-Path $oldFilePath) {
-    # Extract ytInitialData from old file
-    $oldHtmlContent = Get-Content -Path $oldFilePath -Raw -Encoding UTF8
-    $oldYtInitialData = Get-YtInitialData -htmlContent $oldHtmlContent
 
-    # Extract and group specific fields from old file
-    $oldFields = Extract-GroupedFields -jsonObject $oldYtInitialData
+    # Assuming the old file is already in JSON format with the same structure as newFields
+    $oldFields = Get-Content -Path $oldFilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+    if ($Debug) { Write-Host "Loaded $($oldFields.Count) old fields from file" }
 
     # Compare the fields if oldFields is not null
     if ($oldFields) {
@@ -254,7 +375,10 @@ if (Test-Path $oldFilePath) {
             if (-not $uniqueFields.ContainsKey($uniqueKey)) {
                 $uniqueFields[$uniqueKey] = $true
                 if ($_.SideIndicator -eq "=>") {
+					$liveStream = $true
                     $outputString += "New: videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
+                }elseif ($_.SideIndicator -eq "<=") {
+                     $outputString += "Old: videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
                 }
             }
         }
@@ -280,36 +404,63 @@ if (Test-Path $oldFilePath) {
 }
 
 # Replace the old HTML file with the new HTML content
-[System.IO.File]::WriteAllText($oldFilePath, $newHtmlContent, [System.Text.Encoding]::UTF8)
+$newFields | ConvertTo-Json -Depth 100 | Out-File -FilePath $oldFilePath -Encoding UTF8
+#$outputString += "The old HTML file has been replaced with the new HTML content.`n"
 
-# Output the final string
-if ($outputString -ne "") {
+#Write-Host $outputString
+if ($Debug) { Write-Host "outputString : $outputString" }
 
-	$retryCount = 0
-	$success = $false
-	
+# live stream detected, start download process
+if ($liveStream) {
+
 	# Extract the directory path from the DOS command
     $commandDirectory = Split-Path -Path $dosCommand
 
     # Set the working directory to the command's folder
     Set-Location -Path $commandDirectory
+
+	$startTotalTime = Get-Date
+	$retryCount = 0
+	$success = $false
+	$delaySeconds = 180
+	$currentVideoID = $newFields[0].videoId
+	$currentVideoText = $newFields[0].simpleText
 	
-	while ($retryCount -lt $maxRetries -and -not $success) {
+	while (-not $success) {
+		$currentTime = Get-Date
+		$totalElapsed = ($currentTime - $startTotalTime).TotalSeconds
+		if ($totalElapsed -ge $expectedDurationSeconds) {
+			break
+		}
+		if ($retryCount -gt 0) {
+			$remainingTime = $expectedDurationSeconds - $totalElapsed
+			$actualDelay = [math]::Min($delaySeconds, $remainingTime)
+            if ($Debug) { 
+                # Convert remaining seconds into a DateTime starting from Unix epoch (or just current time + remainingTime)
+                $formattedRemainingTime = (Get-Date).AddSeconds($remainingTime).ToString("yyyyMMdd_HHmmss")
+                Write-Host "Retrying download at $formattedRemainingTime ($actualDelay)s later" -ForegroundColor Yellow
+            }
+			if ($actualDelay -gt 0) {
+				Start-Sleep -Seconds $actualDelay
+			}
+		}
 		$retryCount++
+
+		if ($Debug) { Write-Host "Starting download attempt #$retryCount" }
 
 		$startTime = Get-Date
 		try {
-			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message ("" + $newFields[0].simpleText[0].text + " as " + $newFields[0].videoId)
+			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message ("" + $currentVideoText + " as https://www.youtube.com/watch?v=" + $currentVideoID)
 			
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = "cmd.exe"
-            $psi.Arguments = "/c chcp 65001 >nul && $dosCommand $dosCommandArguments$($newFields[0].videoId)"
+            $psi.Arguments = "/c chcp 65001 >nul && $dosCommand $dosCommandArguments$($currentVideoID)"
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
             $psi.UseShellExecute = $false
             $psi.CreateNoWindow = $true
 
-            $psi.WorkingDirectory = "E:\YT-Video"
+            $psi.WorkingDirectory =  Split-Path $dosCommand
             $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
             $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
 
@@ -326,15 +477,15 @@ if ($outputString -ne "") {
 			$endTime = Get-Date
 			$elapsedSeconds = ($endTime - $startTime).TotalSeconds
 			
-			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Run #$retryCount finished (ExitCode=$($process.ExitCode), Duration=$([math]::Round($elapsedSeconds))s)"
+			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($currentVideoText) Run #$retryCount finished (ExitCode=$($process.ExitCode), Duration=$([math]::Round($elapsedSeconds))s)"
 
-			# Success if no error output and ran for the expected time, or specific end-of-stream error
-			if (($null -eq $errorOutput -or $errorOutput -eq "") -and $elapsedSeconds -ge $expectedSeconds) {
+			# Success if no error output and ran for expected time, or specific end-of-stream error
+			if (($null -eq $errorOutput -or $errorOutput -eq "") -and $elapsedSeconds -ge $expectedDurationSeconds) {
 				$success = $true
-				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) - Completed successfully. Ended."
-			} elseif ($errorOutput -match "ERROR: Did not get any data blocks" -and $elapsedSeconds -ge $expectedSeconds) {
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($currentVideoText) - Completed successfully. Ended."
+			} elseif ($errorOutput -match "ERROR: Did not get any data blocks" -and $elapsedSeconds -ge $expectedDurationSeconds) {
 				$success = $true
-				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) - Stream ended normally. Completed."
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($currentVideoText) - Stream ended normally. Completed."
 			} else {
 				Add-Content -Path $logPath -Value ("==== Run #$retryCount start at $($startTime) ====`n" + $output + "`n==== Error ====`n" + $errorOutput + "`n==== Run #$retryCount end at $($endTime) ====`n") -Encoding UTF8
 				$message = Get-TrimmedDownloadOutput($output)
@@ -342,13 +493,11 @@ if ($outputString -ne "") {
 					$message += "`n" + $errorOutput.Trim()
 				}
 				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message $message
-								
-				if ($retryCount -lt $maxRetries) {
-
-					#Clear YT-DLP Cache
-                    $process = Start-Process "cmd.exe" -ArgumentList "/c $dosCommand --rm-cache-dir" -Wait -PassThru
+				
+				# Clear YT-DLP Cache
+                    Start-Process "cmd.exe" -ArgumentList "/c $dosCommand --rm-cache-dir" -Wait -PassThru
                     
-					#Rename downloaded file
+					# Rename downloaded file if exists
 					if ($output -match '\[download\]\s+(.+?)\s+has already been downloaded' -or
 						$output -match '\[Merger\]\s+Merging formats into\s+"(.+?)"') {
 
@@ -357,7 +506,7 @@ if ($outputString -ne "") {
 						# Build timestamp string (yyyyMMdd_HHmmss format)
 						$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
-						# Extract directory and base name
+						# Extract base name and extension
 						$baseName  = [System.IO.Path]::GetFileNameWithoutExtension($downloadedFile)
 						$extension = [System.IO.Path]::GetExtension($downloadedFile)
 
@@ -367,16 +516,18 @@ if ($outputString -ne "") {
 						$downloadFilePath = Join-Path $commandDirectory $downloadedFile
 
 						# Rename the file
-						[System.IO.File]::Move($downloadFilePath, $newFilePath)
-
-						# Notify via Telegram
-						Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file:`n$downloadedFile → $newFileName"
+						if (Get-ChildItem -LiteralPath $downloadFilePath) {
+							[System.IO.File]::Move($downloadFilePath, $newFilePath)
+							# Notify via Telegram
+							Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file:`n$downloadedFile → $newFileName"
+						} else {
+							Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file (Not Found):`n$downloadedFile → $newFileName"
+						}
 					}
 
-					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended prematurely ($expectedSeconds)s. Retrying..."
-				} else {
-					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($newFields[0].simpleText[0].text) Process ended prematurely ($expectedSeconds)s. Max retries reached. Ended."
-				}
+					$retryTime = (Get-Date).AddSeconds($delaySeconds).ToString('HH:mm:ss')
+					Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($currentVideoText) Process ended prematurely $([math]::Round($elapsedSeconds))s. Retrying@$retryTime..."
+				
 			}
 		} catch {
 			$errorMessage = $_.Exception.Message
@@ -386,4 +537,13 @@ if ($outputString -ne "") {
 			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "YT Live Downloader : Error occurred - $errorLogEntry"
 		}
 	}
+	if (-not $success) {
+		Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($currentVideoText) Process ended prematurely ($expectedDurationSeconds)s. Time limit exceeded. Ended."
+	}
+} else {
+    if ($Debug) { Write-Host "No new videos found for URL: $ytURL" }
+    # Optional: Send message if no new videos
+    # Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "YT Live Downloader : No new videos - $ytURL"
 }
+
+if ($Debug) { Write-Host "=== Script Ended with Debug Mode Enabled ===" -ForegroundColor Green }
