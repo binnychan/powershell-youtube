@@ -8,6 +8,7 @@ param(
     [string]$oldFilePath = "C:\Temp\YT-Info.json",
     [string]$logPath = "C:\Temp\YT-Downloader.LOG",
     [int]$expectedDurationSeconds = 3600,
+	[string]$targetTitle = "直播",
     [switch]$ForceDownload,
     [switch]$Debug
 )
@@ -120,7 +121,11 @@ function Send-TelegramTextMessage {
         Method      = 'Post'
     }
     try {
-		if (-not $Debug) {
+        if ($Debug) {
+            Write-Host "Debug Mode: Message payload that would be sent to Telegram:" -ForegroundColor Yellow
+            $payload | ConvertTo-Json -Depth 50 | Write-Host
+            $results = @{ ok = $true; result = @{ message_id = 12345 } }
+       } else {
             $results = Invoke-RestMethod @invokeRestMethodSplat
         }
 	} #try_messageSend
@@ -173,8 +178,6 @@ function Get-GroupedFields {
                 Write-Host "  Tab title: '$title'" -ForegroundColor Cyan
                 Write-Host "    Length: $($title.Length), Bytes: $([System.Text.Encoding]::UTF8.GetBytes($title) -join ',')" -ForegroundColor Gray
                 Write-Host "    Matches $($targetTitle): $($title -eq $($targetTitle))" -ForegroundColor Gray
-                #Write-Host "    Matches '直播': " -ForegroundColor Gray -NoNewline
-                #Write-Host $targetTitle -ForegroundColor Gray
             } else {
                 Write-Host "  Tab: (No title property)" -ForegroundColor Gray
             }
@@ -479,7 +482,7 @@ if ($liveStream -or $ForceDownload) {
 			$endTime = Get-Date
 			$elapsedSeconds = ($endTime - $startTime).TotalSeconds
 			
-			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($currentVideoText) Run #$retryCount finished (ExitCode=$($process.ExitCode), Duration=$([math]::Round($elapsedSeconds))s)"
+			Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "$($currentVideoText) Run #$retryCount finished (ExitCode=$($process.ExitCode), Duration=$([math]::Round($elapsedSeconds))s)" -DisableNotification
 
 			# Success if no error output and ran for expected time, or specific end-of-stream error
 			if (($null -eq $errorOutput -or $errorOutput -eq "") -and $elapsedSeconds -ge $expectedDurationSeconds) {
@@ -494,7 +497,7 @@ if ($liveStream -or $ForceDownload) {
 				if ($null -ne $errorOutput -and $errorOutput -ne "") {
 					$message += "`n" + $errorOutput.Trim()
 				}
-				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message $message
+				Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message $message -DisablePreview -DisableNotification
 				
 				# Clear YT-DLP Cache
                     Start-Process "cmd.exe" -ArgumentList "/c $dosCommand --rm-cache-dir" -Wait -PassThru
@@ -521,9 +524,9 @@ if ($liveStream -or $ForceDownload) {
 						if (Get-ChildItem -LiteralPath $downloadFilePath) {
 							[System.IO.File]::Move($downloadFilePath, $newFilePath)
 							# Notify via Telegram
-							Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file:`n$downloadedFile → $newFileName"
+							Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file:`n$downloadedFile → $newFileName" -DisablePreview -DisableNotification
 						} else {
-							Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file (Not Found):`n$downloadedFile → $newFileName"
+							Send-TelegramTextMessage -BotToken $botToken -ChatID $chat -Message "Renamed file (Not Found):`n$downloadedFile → $newFileName" -DisablePreview -DisableNotification
 						}
 					}
 
