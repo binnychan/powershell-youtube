@@ -8,6 +8,7 @@ param(
     [string]$oldFilePath = "C:\Temp\YT-Info.json",
     [string]$logPath = "C:\Temp\YT-Downloader.LOG",
     [int]$expectedDurationSeconds = 3600,
+    [switch]$ForceDownload,
     [switch]$Debug
 )
 
@@ -383,6 +384,7 @@ if (Test-Path $oldFilePath) {
             }
         }
     } else {
+		$liveStream = $true
         $outputString += "Old file is empty or does not contain ytInitialData.`n"
         $newFields | ForEach-Object {
             $uniqueKey = "$($_.videoId)|$($_.simpleText)"
@@ -393,6 +395,7 @@ if (Test-Path $oldFilePath) {
         }
     }
 } else {
+	$liveStream = $true
     $outputString += "Old file not found. Showing videoId from new HTML content:`n"
     $newFields | ForEach-Object {
         $uniqueKey = "$($_.videoId)|$($_.simpleText)"
@@ -407,11 +410,10 @@ if (Test-Path $oldFilePath) {
 $newFields | ConvertTo-Json -Depth 100 | Out-File -FilePath $oldFilePath -Encoding UTF8
 #$outputString += "The old HTML file has been replaced with the new HTML content.`n"
 
-#Write-Host $outputString
 if ($Debug) { Write-Host "outputString : $outputString" }
 
-# live stream detected, start download process
-if ($liveStream) {
+# live stream detected or force download specified, start download process
+if ($liveStream -or $ForceDownload) {
 
 	# Extract the directory path from the DOS command
     $commandDirectory = Split-Path -Path $dosCommand
