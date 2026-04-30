@@ -379,32 +379,32 @@ if (Test-Path $oldFilePath) {
             if (-not $uniqueFields.ContainsKey($uniqueKey)) {
                 $uniqueFields[$uniqueKey] = $true
                 if ($_.SideIndicator -eq "=>") {
-					$liveStream = $true
-                    $outputString += "New: videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
+                    $liveStream = $true
+                    $outputString += "New: videoId = $($_.videoId), liveStream = $($liveStream), simpleText = $($_.simpleText)`n"
                 }elseif ($_.SideIndicator -eq "<=") {
-                     $outputString += "Old: videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
+                     $outputString += "Old: videoId = $($_.videoId), liveStream = $($liveStream), simpleText = $($_.simpleText)`n"
                 }
             }
         }
     } else {
-		$liveStream = $true
+        $liveStream = $true
         $outputString += "Old file is empty or does not contain ytInitialData.`n"
         $newFields | ForEach-Object {
             $uniqueKey = "$($_.videoId)|$($_.simpleText)"
             if (-not $uniqueFields.ContainsKey($uniqueKey)) {
                 $uniqueFields[$uniqueKey] = $true
-                $outputString += "videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
+                $outputString += "videoId = $($_.videoId), liveStream = $($liveStream), simpleText = $($_.simpleText)`n"
             }
         }
     }
 } else {
-	$liveStream = $true
+    $liveStream = $true
     $outputString += "Old file not found. Showing videoId from new HTML content:`n"
     $newFields | ForEach-Object {
         $uniqueKey = "$($_.videoId)|$($_.simpleText)"
         if (-not $uniqueFields.ContainsKey($uniqueKey)) {
             $uniqueFields[$uniqueKey] = $true
-            $outputString += "videoId = $($_.videoId), simpleText = $($_.simpleText)`n"
+            $outputString += "videoId = $($_.videoId), liveStream = $($liveStream), simpleText = $($_.simpleText)`n"
         }
     }
 }
